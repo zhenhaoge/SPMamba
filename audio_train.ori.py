@@ -35,14 +35,12 @@ import warnings
 
 warnings.filterwarnings("ignore")
 
-
 parser = argparse.ArgumentParser()
 parser.add_argument(
     "--conf_dir",
     default="local/conf.yml",
     help="Full path to save best validation model",
 )
-# args = parser.parse_args()
 
 def main(config):
     print_only(
@@ -86,10 +84,10 @@ def main(config):
             }
 
     # Just after instantiating, save the args. Easy loading in the future.
-    config["exp_dir"] = os.path.join(
-        os.getcwd(), "experiments", "checkpoint", config["exp"]["exp_name"]
+    config["main_args"]["exp_dir"] = os.path.join(
+        os.getcwd(), "Experiments", "checkpoint", config["exp"]["exp_name"]
     )
-    exp_dir = config["exp_dir"]
+    exp_dir = config["main_args"]["exp_dir"]
     os.makedirs(exp_dir, exist_ok=True)
     conf_path = os.path.join(exp_dir, "conf.yml")
     with open(conf_path, "w") as outfile:
@@ -149,7 +147,7 @@ def main(config):
     distributed_backend = "cuda" if torch.cuda.is_available() else None
 
     # default logger used by trainer
-    logger_dir = os.path.join(os.getcwd(), "experiments", "tensorboard_logs")
+    logger_dir = os.path.join(os.getcwd(), "Experiments", "tensorboard_logs")
     os.makedirs(os.path.join(logger_dir, config["exp"]["exp_name"]), exist_ok=True)
     # comet_logger = TensorBoardLogger(logger_dir, name=config["exp"]["exp_name"])
     comet_logger = WandbLogger(
@@ -159,13 +157,6 @@ def main(config):
             # offline=True
     )
 
-    # Get checkpoint if exist
-    checkpoint_path = os.path.join(exp_dir, "last.ckpt")
-    if os.path.exists(checkpoint_path):
-        print(f"Resuming training from checkpoint: {checkpoint_path}")
-    else:
-        checkpoint_path = None  # Start fresh if no checkpoint exists
-
     trainer = pl.Trainer(
         precision="bf16-mixed",
         max_epochs=config["training"]["epochs"],
@@ -173,7 +164,7 @@ def main(config):
         default_root_dir=exp_dir,
         devices=gpus,
         accelerator=distributed_backend,
-        strategy=DDPStrategy(find_unused_parameters=False), # consider to set False, due to warning in training
+        strategy=DDPStrategy(find_unused_parameters=True),
         limit_train_batches=1.0,  # Useful for fast experiment
         gradient_clip_val=5.0,
         logger=comet_logger,
@@ -182,8 +173,7 @@ def main(config):
         # sync_batchnorm=True,
         # fast_dev_run=True,
     )
-    # trainer.fit(system)
-    trainer.fit(system, ckpt_path=checkpoint_path if checkpoint_path else None)
+    trainer.fit(system)
     print_only("Finished Training")
     best_k = {k: v.item() for k, v in checkpoint.best_k_models.items()}
     with open(os.path.join(exp_dir, "best_k_models.json"), "w") as f:
@@ -198,7 +188,6 @@ def main(config):
 
 
 if __name__ == "__main__":
-
     import yaml
     from pprint import pprint
     from look2hear.utils.parser_utils import (
@@ -206,30 +195,10 @@ if __name__ == "__main__":
         parse_args_as_dict,
     )
 
-    # --- runtime mode start --- #
     args = parser.parse_args()
-
     with open(args.conf_dir) as f:
         def_conf = yaml.safe_load(f)
-
     parser = prepare_parser_from_dict(def_conf, parser=parser)
     arg_dic, plain_args = parse_args_as_dict(parser, return_plain_args=True)
-
-    # --- runtime mode end --- #
-
-    # # --- interactive mode start --- #
-
-    # args = argparse.ArgumentParser()
-    # args.conf_dir = os.path.join(os.getcwd(), 'configs', 'spmamba-echo2mix.yml')
-
-    # with open(args.conf_dir) as f:
-    #     def_conf = yaml.safe_load(f)
-
-    # arg_dic = def_conf
-
-    # # --- interactive mode end --- #
-
-    print(f'conf dir: {args.conf_dir}')
     # pprint(arg_dic)
-    config = arg_dic
-    main(config)
+    main(arg_dic)

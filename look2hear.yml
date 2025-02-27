@@ -58,7 +58,7 @@ dependencies:
       - contourpy==1.2.0
       - crcmod==1.7
       - cryptography==41.0.5
-      - ctcdecode==1.0.3
+      - ctcdecode
       - cycler==0.12.1
       - datasets==2.13.0
       - debugpy==1.8.0
