@@ -36,7 +36,7 @@ loss:
 
 training:
   system: AudioLightningModule
-  gpus: [0,1,2,3,4,5,6,7,8,9]
+  gpus: [0,1,2,3] # original: [0,1,2,3,4,5,6,7,8,9]
   parallel: ddp
   epochs: 500
   early_stop:
@@ -63,11 +63,11 @@ scheduler:
 datamodule:
   data_name: Echo2MixDataModule
   data_config:
-    train_dir: DataPreProcess/wsj0/tr
-    valid_dir: DataPreProcess/wsj0/cv
-    test_dir: DataPreProcess/wsj0/tt
+    train_dir: data/WSJ0-2Mix/train
+    valid_dir: data/WSJ0-2Mix/val
+    test_dir: data/WSJ0-2Mix/test
     n_src: 2
-    sample_rate: 8000
+    sample_rate: 16000
     segment: 4.0
     normalize_audio: false
     batch_size: 1
@@ -76,4 +76,4 @@ datamodule:
     persistent_workers: false
 
 exp:
-  exp_name: SPMamba-WSJ0
+  exp_name: SPMamba-WSJ0-2Mix

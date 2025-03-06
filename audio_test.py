@@ -46,7 +46,7 @@ from rich.progress import (
     TransferSpeedColumn,
 )
 
-def write_outputs(test_set, idx, est_sources_np, ex_save_dir):
+def write_outputs(test_set, idx, est_sources_np, ex_save_dir, dataset):
     """write 5 wav files per entry:
         - original clean speaker file 1 and 2 before mixing (2 files)
         - mixed file (1 file)
@@ -60,8 +60,12 @@ def write_outputs(test_set, idx, est_sources_np, ex_save_dir):
 
     # get unique prefix
     ndigits = len(str(len(test_set)))
-    record, room, spks, _ = mix_file.split(os.sep)[-4:]
-    prefix = '-'.join([f'{idx:0{ndigits}d}', record, room, spks])
+    if dataset == 'Echo2Mix':
+        record, room, spks, _ = mix_file.split(os.sep)[-4:]
+        prefix = '-'.join([f'{idx:0{ndigits}d}', record, room, spks])
+    elif dataset == 'WSJ0-2Mix':
+        filename = os.path.splitext(os.path.basename(mix_file))[0]
+        prefix = '-'.join([f'{idx:0{ndigits}d}', filename])
 
     # define 3 output files
     mix_file2 = os.path.join(ex_save_dir, f'{prefix}-mix.wav')
@@ -86,6 +90,16 @@ def parse_args():
     parser.add_argument("--conf_file",
                         default="local/mixit_conf.yml",
                         help="Full path to save best validation model")
+    parser.add_argument("--model_path",
+                        default="",
+                        help="model path (optional)")
+    parser.add_argument("--dataset",
+                        default='Echo2Mix',
+                        help="dataset name")
+    parser.add_argument("--sample_rate",
+                        type=int,
+                        default="16000",
+                        help="data sample rate (override the sample rate in the config)")
     parser.add_argument("--num_outputs",
                         type=int,
                         default=0,
@@ -102,7 +116,14 @@ def parse_args():
 compute_metrics = ["si_sdr", "sdr"]
 os.environ['CUDA_VISIBLE_DEVICES'] = "0" # adjust based on available GPU
 
-def main(config, num_outputs, save_output):
+def main(config):
+
+    model_path = config["model_path"]
+    dataset = config["dataset"]
+    sample_rate = config["sample_rate"]
+    num_outputs = config["num_outputs"]
+    save_output = config["save_output"]
+
     metricscolumn = MyMetricsTextColumn(style=RichProgressBarTheme.metrics)
     progress = Progress(
         TextColumn("[bold blue]Testing", justify="right"),
@@ -123,11 +144,22 @@ def main(config, num_outputs, save_output):
         os.getcwd(), "experiments", "checkpoint", config["train_conf"]["exp"]["exp_name"]
     )
     exp_dir = config["train_conf"]["main_args"]["exp_dir"]
+    print(f'exp dir: {exp_dir}')
 
-    # model_path = os.path.join(exp_dir, "best_model.pth")
-    model_path = os.path.join(exp_dir, "last.ckpt")
+    # validate model path
+    if len(model_path) == 0:
+        # model_path = os.path.join(exp_dir, "best_model.pth")
+        # model_path = os.path.join(exp_dir, "last.ckpt")
+        model_path = os.path.join(exp_dir, "last.pth")
+        print(f'set default model path: {model_path}')
+
+    # roll back to the ckpt model (*.ckpt) if the clean model (*.pth) does not exist 
+    ext = os.path.splitext(model_path)[-1]
+    if ext == '.pth' and not os.path.isfile(model_path):
+        model_path = model_path.replace('.pth', '.ckpt')
+        print(f'use {model_path} (.ckpt instead of .pth)')
+
     assert os.path.isfile(model_path), f'model path: {model_path} does not exist!'
-
     print(f'model path: {model_path}')
     # import pdb; pdb.set_trace()
     # conf["train_conf"]["masknet"].update({"n_src": 2})
@@ -207,6 +239,9 @@ def main(config, num_outputs, save_output):
 
         to_save = system.audio_model.serialize()
         clean_model_path = model_path.replace('.ckpt', '.pth')
+        epoch = state_dict['epoch']
+        model_name = f'ep{epoch}'
+        clean_model_path = clean_model_path.replace('last', model_name)
         torch.save(to_save, os.path.join(exp_dir, clean_model_path))
 
         print(f'coverted model from {model_path} to {clean_model_path}')
@@ -224,15 +259,25 @@ def main(config, num_outputs, save_output):
         model.to(device)
     model_device = next(model.parameters()).device
 
+    # datamodule_ori = object = getattr(look2hear.datas, config["train_conf"]["datamodule"]["data_name"])(
+    #     **config["train_conf"]["datamodule"]["data_config"])
+    # datamodule_ori.setup()
+    # _, _ , test_set_ori = datamodule_ori.make_sets
+
+    # config["train_conf"]["datamodule"]["data_config"]["segment"] = 4.0
+    config["train_conf"]["datamodule"]["data_config"]["train_dir"] = f'data/{dataset}/train'
+    config["train_conf"]["datamodule"]["data_config"]["valid_dir"] = f'data/{dataset}/val'
+    config["train_conf"]["datamodule"]["data_config"]["test_dir"] = f'data/{dataset}/test'
+
     datamodule: object = getattr(look2hear.datas, config["train_conf"]["datamodule"]["data_name"])(
-        **config["train_conf"]["datamodule"]["data_config"]
-    )
+        **config["train_conf"]["datamodule"]["data_config"])
     datamodule.setup()
     _, _ , test_set = datamodule.make_sets
    
     # set the output dir
+    sr_type = {8000: '8k', 16000: '16k'}
     model_name = os.path.splitext(os.path.basename(model_path))[0]
-    ex_save_dir = os.path.join(exp_dir, "results", model_name)
+    ex_save_dir = os.path.join(exp_dir, "results", model_name, f'{dataset}-{sr_type[sample_rate]}')
     if os.path.isdir(ex_save_dir):
         print(f'use existing output dir: {ex_save_dir}')
     else:
@@ -261,7 +306,7 @@ def main(config, num_outputs, save_output):
 
             # save the first 10 test files
             if idx < num_outputs and save_output:
-                write_outputs(test_set, idx, est_sources_np, ex_save_dir)
+                write_outputs(test_set, idx, est_sources_np, ex_save_dir, dataset)
             # else:
             #     print(f'completed generating {num_outputs} testing samples, done!')
             #     break
@@ -286,9 +331,11 @@ if __name__ == "__main__":
 
     # # interactive mode
     # args = argparse.ArgumentParser()
-    # # args.conf_file = os.path.join(os.getcwd(), "configs", "spmamba-echo2mix.yml")
-    # args.conf_file = os.path.join(os.getcwd(), "experiments", "checkpoint", "SPMamba-Echo2Mix", "conf.yml")
-    # # args.conf_file = os.path.join(os.getcwd(), "experiments", "checkpoint", "SPMamba-Librimix", "conf.yml")
+    # args.conf_file = os.path.join(os.getcwd(), "experiments", "checkpoint", "SPMamba-WSJ0", "conf.yml")
+    # args.model_path = os.path.join(os.getcwd(), "experiments", "checkpoint", "SPMamba-WSJ0", 'last.pth')
+    # args.model_path = os.path.join(os.getcwd(), "experiments", "checkpoint", "SPMamba-WSJ0", 'ep153.pth')
+    # args.dataset = 'WSJ0-2Mix'
+    # args.sample_rate = 16000
     # args.num_outputs = 10
     # args.save_output = True
 
@@ -297,6 +344,9 @@ if __name__ == "__main__":
 
     # print input arguments
     print(f'conf dir: {args.conf_file}')
+    print(f'model path: {args.model_path}')
+    print(f'data set: {args.dataset}')
+    print(f'sample rate: {args.sample_rate}')
     print(f'num of outputs: {args.num_outputs}')
     print(f'save output: {args.save_output}')
 
@@ -309,6 +359,4 @@ if __name__ == "__main__":
     # print(arg_dic)
 
     config = arg_dic
-    num_outputs = args.num_outputs
-    save_output = args.save_output
-    main(config, num_outputs, save_output)
+    main(config)
