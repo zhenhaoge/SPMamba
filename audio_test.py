@@ -46,7 +46,7 @@ from rich.progress import (
     TransferSpeedColumn,
 )
 
-def write_outputs(test_set, idx, est_sources_np, ex_save_dir, dataset):
+def write_outputs(test_set, idx, est_sources_np, ex_save_dir, dataset=None):
     """write 5 wav files per entry:
         - original clean speaker file 1 and 2 before mixing (2 files)
         - mixed file (1 file)
@@ -57,6 +57,16 @@ def write_outputs(test_set, idx, est_sources_np, ex_save_dir, dataset):
     mix_file = test_set.mix[idx][0]
     spk1_reverb_file = test_set.sources[0][idx][0]
     spk2_reverb_file = test_set.sources[1][idx][0]
+
+    # set dataset (optional)
+    if not dataset:
+        parts = mix_file.split(os.sep)
+        if 'WSJ0' in parts:
+            dataset = 'WSJ0-2Mix'
+        elif 'Echo2Mix' in parts:
+            dataset = 'Echo2Mix'
+        else:
+            raise Exception('dataset is not set!')
 
     # get unique prefix
     ndigits = len(str(len(test_set)))
@@ -72,14 +82,35 @@ def write_outputs(test_set, idx, est_sources_np, ex_save_dir, dataset):
     spk1_reverb_file2 = os.path.join(ex_save_dir, f'{prefix}-s1_reverb.wav')
     spk2_reverb_file2 = os.path.join(ex_save_dir, f'{prefix}-s2_reverb.wav')
 
-    # write 3 output files (just for reference) by copying
-    shutil.copy(mix_file, mix_file2)
-    shutil.copy(spk1_reverb_file, spk1_reverb_file2)
-    shutil.copy(spk2_reverb_file, spk2_reverb_file2)
+    # write 3 output files (just for reference)
+    if test_set.normalize_audio:
+        # apply normalization
+        mixture, sources, filename = test_set.preprocess_audio_only(idx)
+        wav.write(mix_file2, test_set.sample_rate, mixture.cpu().numpy())
+        wav.write(spk1_reverb_file2, test_set.sample_rate, sources[0].cpu().numpy())
+        wav.write(spk2_reverb_file2, test_set.sample_rate, sources[1].cpu().numpy())
+    else:
+        # by copying
+        shutil.copy(mix_file, mix_file2)
+        shutil.copy(spk1_reverb_file, spk1_reverb_file2)
+        shutil.copy(spk2_reverb_file, spk2_reverb_file2)
 
     # define 2 more output files (after separation)
     spk1_sep_file = os.path.join(ex_save_dir, f'{prefix}-s1.wav')
     spk2_sep_file = os.path.join(ex_save_dir, f'{prefix}-s2.wav')
+
+    # swap rows in estimated sources if needed
+    M = [[0,0], [0,0]]
+    for i in range(2):
+        s1 = sources[i].cpu().numpy()
+        for j in range(2):
+            s2 = est_sources_np[j].cpu().numpy()
+            v = np.sum(np.abs(s1-s2))
+            M[i][j] = v
+            # print(f'i:{i}, j:{j}, {v:.2f}')
+
+    if M[0][0] + M[1][1] > M[0][1] + M[1][0]:
+        est_sources_np = est_sources_np[[1, 0], :]
 
     # write 2 more output files
     wav.write(spk1_sep_file, test_set.sample_rate, est_sources_np[0].cpu().numpy())
@@ -115,6 +146,8 @@ def parse_args():
 
 compute_metrics = ["si_sdr", "sdr"]
 os.environ['CUDA_VISIBLE_DEVICES'] = "0" # adjust based on available GPU
+device_id = os.environ['CUDA_VISIBLE_DEVICES']
+device = torch.device(f"cuda:{device_id}")
 
 def main(config):
 
@@ -255,19 +288,22 @@ def main(config):
     )
 
     if config["train_conf"]["training"]["gpus"]:
-        device = "cuda"
+        if not device:
+            device = "cuda"
         model.to(device)
     model_device = next(model.parameters()).device
 
-    # datamodule_ori = object = getattr(look2hear.datas, config["train_conf"]["datamodule"]["data_name"])(
+    # datamodule_ori: object = getattr(look2hear.datas, config["train_conf"]["datamodule"]["data_name"])(
     #     **config["train_conf"]["datamodule"]["data_config"])
     # datamodule_ori.setup()
     # _, _ , test_set_ori = datamodule_ori.make_sets
 
+    sr_type = {8000: '8k', 16000: '16k'}
+    sr = sr_type[sample_rate]
     # config["train_conf"]["datamodule"]["data_config"]["segment"] = 4.0
-    config["train_conf"]["datamodule"]["data_config"]["train_dir"] = f'data/{dataset}/train'
-    config["train_conf"]["datamodule"]["data_config"]["valid_dir"] = f'data/{dataset}/val'
-    config["train_conf"]["datamodule"]["data_config"]["test_dir"] = f'data/{dataset}/test'
+    config["train_conf"]["datamodule"]["data_config"]["train_dir"] = f"data/{dataset}/{sr}/train"
+    config["train_conf"]["datamodule"]["data_config"]["valid_dir"] = f"data/{dataset}/{sr}/val"
+    config["train_conf"]["datamodule"]["data_config"]["test_dir"] = f"data/{dataset}/{sr}/test"
 
     datamodule: object = getattr(look2hear.datas, config["train_conf"]["datamodule"]["data_name"])(
         **config["train_conf"]["datamodule"]["data_config"])
@@ -275,9 +311,8 @@ def main(config):
     _, _ , test_set = datamodule.make_sets
    
     # set the output dir
-    sr_type = {8000: '8k', 16000: '16k'}
     model_name = os.path.splitext(os.path.basename(model_path))[0]
-    ex_save_dir = os.path.join(exp_dir, "results", model_name, f'{dataset}-{sr_type[sample_rate]}')
+    ex_save_dir = os.path.join(exp_dir, "results", model_name, f'{dataset}-{sr}')
     if os.path.isdir(ex_save_dir):
         print(f'use existing output dir: {ex_save_dir}')
     else:
@@ -289,10 +324,37 @@ def main(config):
     metrics = MetricsTracker(save_file=csvfile)
     torch.no_grad().__enter__()
 
+    # get num. of testing samples
     num_test_set = len(test_set)
     print(f'# testing samples: {num_test_set}')
-    ndigits = len(str(num_test_set))
+    # ndigits = len(str(num_test_set))
 
+    # get set-wise indeces for combined dataset
+    idxs1, idxs2 = [], []
+    if dataset == 'WSJ0-Echo-2Mix':
+        for idx in range(num_test_set):
+            basename = os.path.basename(test_set.mix[idx][0])
+            if basename == 'mix.wav':
+                idxs2.append(idx)
+            else:
+                idxs1.append(idx)
+
+    # evaluate on the selected samples to get speech output
+    for i in range(num_outputs):
+        for idxs in [idxs1, idxs2]:
+            idx = idxs[i]
+
+            # Forward the network on the mixture.
+            mix, sources, key = tensors_to_device(test_set[idx], device=model_device)
+            print(f'i:{i}, idx:{idx}, key:{key}')
+            est_sources = model(mix[None]) # #samples X n_src X sample length
+            mix_np = mix
+            sources_np = sources
+            est_sources_np = est_sources.squeeze(0) # n_src X sample length
+
+            write_outputs(test_set, idx, est_sources_np, ex_save_dir, dataset=None)
+
+    # evaluate on all samples to get the avg. metrics
     with progress:
         for idx in progress.track(range(num_test_set)):
 
@@ -303,13 +365,6 @@ def main(config):
             mix_np = mix
             sources_np = sources
             est_sources_np = est_sources.squeeze(0) # n_src X sample length
-
-            # save the first 10 test files
-            if idx < num_outputs and save_output:
-                write_outputs(test_set, idx, est_sources_np, ex_save_dir, dataset)
-            # else:
-            #     print(f'completed generating {num_outputs} testing samples, done!')
-            #     break
 
             metrics(mix=mix_np,
                     clean=sources_np,
@@ -331,16 +386,33 @@ if __name__ == "__main__":
 
     # # interactive mode
     # args = argparse.ArgumentParser()
-    # args.conf_file = os.path.join(os.getcwd(), "experiments", "checkpoint", "SPMamba-WSJ0", "conf.yml")
-    # args.model_path = os.path.join(os.getcwd(), "experiments", "checkpoint", "SPMamba-WSJ0", 'last.pth')
-    # args.model_path = os.path.join(os.getcwd(), "experiments", "checkpoint", "SPMamba-WSJ0", 'ep153.pth')
-    # args.dataset = 'WSJ0-2Mix'
+
+    ## WSJ0-2Mix
+    # args.dataset = 'WSJ0-2Mix' # WSJ0-2Mix, Echo2Mix, WSJ0-Echo-2Mix
+    # args.conf_file = os.path.join(os.getcwd(), "experiments", "checkpoint", f"SPMamba-{args.dataset}", "conf.yml")
+    # args.model_path = os.path.join(os.getcwd(), "experiments", "checkpoint", f"SPMamba-{args.dataset}", 'last.pth')
+    # args.model_path = os.path.join(os.getcwd(), "experiments", "checkpoint", f"SPMamba-{args.dataset}", 'ep153.pth')
+    # args.model_path = os.path.join(os.getcwd(), 'experiments', 'checkpoint', f"SPMamba-{args.dataset}", 'best_model.pth')
+
+    # # WSJ0-Echo-2Mix_norm_std
+    # args.dataset = 'WSJ0-Echo-2Mix_norm_std' # WSJ0-2Mix, Echo2Mix, WSJ0-Echo-2Mix
+    # args.conf_file = os.path.join(os.getcwd(), "experiments", "checkpoint", f"SPMamba-{args.dataset}", 'conf.yml')
+    # args.model_path = os.path.join(os.getcwd(), "experiments", "checkpoint", f"SPMamba-{args.dataset}", 'best_model.pth')
+
+    # # WSJ0-Echo-2Mix
+    # args.dataset = 'WSJ0-Echo-2Mix' # WSJ0-2Mix, Echo2Mix, WSJ0-Echo-2Mix
+    # args.conf_file = os.path.join(os.getcwd(), "experiments", "checkpoint", f"SPMamba-{args.dataset}", 'conf.yml')
+    # args.model_path = os.path.join(os.getcwd(), "experiments", "checkpoint", f"SPMamba-{args.dataset}", 'last.ckpt')
+    # args.model_path = os.path.join(os.getcwd(), "experiments", "checkpoint", f"SPMamba-{args.dataset}", 'ep64.pth')
+    # args.model_path = os.path.join(os.getcwd(), "experiments", "checkpoint", f"SPMamba-{args.dataset}", 'best_model.pth')
+
     # args.sample_rate = 16000
     # args.num_outputs = 10
     # args.save_output = True
 
     # check file/dir existence
     assert os.path.isfile(args.conf_file), f"config file: {args.conf_file} does not exist!"
+    assert os.path.isfile(args.model_path), f"model file: {args.model_path} does not exist!"
 
     # print input arguments
     print(f'conf dir: {args.conf_file}')

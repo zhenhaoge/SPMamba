@@ -10,8 +10,9 @@ api = wandb.Api()
 # assert os.path.isfile(wandb_file), f"wandb file: {wandb_file} does not exist!"
 
 # set wandb dir
-experiment = "SPMamba-WSJ0" # SPMamba-Echo2Mix, SPMamba-WSJ0
+experiment = "SPMamba-WSJ0-Echo-2Mix" # SPMamba-Echo2Mix, SPMamba-WSJ0, SPMamba-WSJ0-Echo-2Mix
 wandb_dir = os.path.join(os.getcwd(), "experiments", "tensorboard_logs", experiment, "wandb")
+assert os.path.isdir(wandb_dir), f'wandb dir: {wandb_dir} does not exist!'
 
 # get run dir and run id
 run_dir = os.path.join(wandb_dir, "latest-run")

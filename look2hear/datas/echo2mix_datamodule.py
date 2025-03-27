@@ -16,18 +16,25 @@ from typing import Dict, Iterable, List, Iterator
 from rich import print
 from pytorch_lightning.utilities import rank_zero_only
 
-
 @rank_zero_only
 def print_(message: str):
     print(message)
 
+def normalize_tensor_wav(wav_tensor, eps=1e-8, std=None, mean=None, scale=None, normtype='std'):
+    if normtype == 'std':
+        if mean is None:
+            mean = wav_tensor.mean(-1, keepdim=True)
+        if std is None:
+            std = wav_tensor.std(-1, keepdim=True)
+        wav_tensor_norm = (wav_tensor - mean) / (std + eps)
+    elif normtype == 'abs-max':
+        if scale is None:
+            scale = torch.amax(torch.abs(wav_tensor), dim=-1, keepdim=True)
+        wav_tensor_norm = wav_tensor / (scale + eps)
+    else:
+        raise Exception(f'normalization type can only be std or abs-max')
 
-def normalize_tensor_wav(wav_tensor, eps=1e-8, std=None):
-    mean = wav_tensor.mean(-1, keepdim=True)
-    if std is None:
-        std = wav_tensor.std(-1, keepdim=True)
-    return (wav_tensor - mean) / (std + eps)
-
+    return wav_tensor_norm
 
 class Echo2MixDataset(Dataset):
     def __init__(
@@ -144,9 +151,13 @@ class Echo2MixDataset(Dataset):
             target = torch.from_numpy(s)
             mixture = torch.from_numpy(x)
             if self.normalize_audio:
+                # original: apply mixture std in target
+                # updated (zge): apply both mixture std and mixture mean in target
                 m_std = mixture.std(-1, keepdim=True)
-                mixture = normalize_tensor_wav(mixture, eps=self.EPS, std=m_std)
-                target = normalize_tensor_wav(target, eps=self.EPS, std=m_std)
+                m_mean = mixture.mean(-1, keepdim=True)
+                m_scale = torch.amax(torch.abs(mixture), dim=-1, keepdim=True)
+                mixture = normalize_tensor_wav(mixture, eps=self.EPS, std=m_std, mean=m_mean, scale=m_scale, normtype='abs-max')
+                target = normalize_tensor_wav(target, eps=self.EPS, std=m_std, mean=m_mean, scale=m_scale, normtype='abs-max')
             return mixture, target.unsqueeze(0), self.mix[idx][0].split("/")[-1]
         # import pdb; pdb.set_trace()
         if self.n_src == 2:
@@ -165,19 +176,25 @@ class Echo2MixDataset(Dataset):
             # Load sources
             source_arrays = []
             for src in self.sources:
+            # for src in train_loader.dataset.sources:
                 s, _ = sf.read(
                     src[idx][0], start=rand_start, stop=stop, dtype="float32"
                 )
                 source_arrays.append(s)
-            sources = torch.from_numpy(np.vstack(source_arrays))
-            mixture = torch.from_numpy(x)
+            sources = torch.from_numpy(np.vstack(source_arrays)) # shape: seg_len
+            mixture = torch.from_numpy(x) # shape: 2 X seg_len
 
             if self.normalize_audio:
+                # original: apply mixture std in target
+                # updated (zge): apply both mixture std and mixture mean in target
                 m_std = mixture.std(-1, keepdim=True)
-                mixture = normalize_tensor_wav(mixture, eps=self.EPS, std=m_std)
-                sources = normalize_tensor_wav(sources, eps=self.EPS, std=m_std)
+                m_mean = mixture.mean(-1, keepdim=True)
+                m_scale = torch.amax(torch.abs(mixture), dim=-1, keepdim=True)
+                mixture = normalize_tensor_wav(mixture, eps=self.EPS, std=m_std, mean=m_mean, scale=m_scale, normtype='abs-max')
+                sources = normalize_tensor_wav(sources, eps=self.EPS, std=m_std, mean=m_mean, scale=m_scale, normtype='abs-max')
 
-            return mixture, sources, self.mix[idx][0].split("/")[-1]
+            filename = self.mix[idx][0].split("/")[-1]
+            return mixture, sources, filename
 
     def __getitem__(self, index: int):
         return self.preprocess_audio_only(index)
